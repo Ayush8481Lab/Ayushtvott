@@ -28,30 +28,31 @@ function buildImageUrl(imagePath, size = null) {
   if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
     return imagePath;
   }
-  // Remove leading slash if present
   let path = imagePath.startsWith('/') ? imagePath.slice(1) : imagePath;
-
-  // If size provided and path contains a dimension like "160x240", replace it
   if (size && /\/\d+x\d+\//.test(path)) {
     path = path.replace(/\/\d+x\d+\//, `/${size}/`);
   }
   return `https://qqcdnpictest.mxplay.com/${path}`;
 }
 
-// Helper: Build stream URL (exactly as in your React code)
+// Helper: Build stream URL with fallback to videoHash
 function buildStreamUrl(item) {
   const stream = item.stream;
   if (!stream) return '';
 
-  let path = 
-    stream.thirdParty?.hlsUrl ||
-    stream.thirdParty?.webHlsUrl ||
-    stream.hls?.high ||
-    stream.hls?.main ||
-    stream.mxplay?.hls?.high;
+  // Try all possible HLS paths
+  let path = stream.thirdParty?.hlsUrl ||
+             stream.thirdParty?.webHlsUrl ||
+             stream.hls?.high ||
+             stream.hls?.main ||
+             stream.mxplay?.hls?.high;
+
+  // Fallback: construct from videoHash if no path found
+  if (!path && stream.videoHash) {
+    path = `video/${stream.videoHash}/2/hls/h264_high.m3u8`;
+  }
 
   if (!path) return '';
-
   if (path.startsWith('http://') || path.startsWith('https://')) {
     return path;
   }
@@ -79,17 +80,19 @@ async function fetchAllMovies() {
       'pageNum': pageNum,
       'pageSize': pageSize
     };
+    console.log(`Fetching page ${pageNum}...`);
     const response = await axios.get(API_BASE, { params, timeout: 15000 });
     const data = response.data;
 
     if (totalCount === null) {
       totalCount = data.totalCount;
+      console.log(`Total count from API: ${totalCount}`);
     }
 
     const items = data.items || [];
+    console.log(`Page ${pageNum}: received ${items.length} items`);
     allMovies.push(...items);
 
-    // Check if we have all items
     if (allMovies.length >= totalCount || items.length === 0) {
       break;
     }
@@ -102,29 +105,33 @@ async function fetchAllMovies() {
 // Build M3U playlist from movie list
 function buildM3U(movies) {
   const lines = ['#EXTM3U'];
+  let validCount = 0;
+
   for (const movie of movies) {
-    // Skip if no stream URL
     const streamUrl = buildStreamUrl(movie);
-    if (!streamUrl) continue;
+    if (!streamUrl) {
+      console.warn(`Skipping "${movie.title}" (id: ${movie.id}) - no stream URL`);
+      continue;
+    }
 
     const id = movie.id || '';
     let logo = '';
 
-    // Find a portrait image, preferably portrait_large
     const portraitLarge = movie.imageInfo?.find(img => img.type === 'portrait_large');
     const anyImage = movie.imageInfo?.find(img => img.url);
     const imageInfo = portraitLarge || anyImage;
 
     if (imageInfo && imageInfo.url) {
-      // Attempt to get 320x480 by replacing dimension (if original is 160x240)
       logo = buildImageUrl(imageInfo.url, '320x480');
     }
 
     const title = movie.title || 'Unknown';
     lines.push(`#EXTINF:-1 tvg-id="${id}" tvg-logo="${logo}" group-title="Movies", ${title}`);
-    // Append #.mp4 as per sample
     lines.push(`${streamUrl}#.mp4`);
+    validCount++;
   }
+
+  console.log(`Built playlist with ${validCount} valid entries out of ${movies.length} items`);
   return lines.join('\n');
 }
 
@@ -133,6 +140,7 @@ async function updatePlaylistIfNeeded(forceRebuild = false) {
   try {
     console.log('Checking total count...');
     const newTotalCount = await fetchTotalCount();
+    console.log(`New total count: ${newTotalCount}`);
 
     if (
       forceRebuild ||
@@ -142,19 +150,25 @@ async function updatePlaylistIfNeeded(forceRebuild = false) {
     ) {
       console.log(`Count changed or cache empty (old: ${cachedTotalCount}, new: ${newTotalCount}). Rebuilding...`);
       const { movies, totalCount } = await fetchAllMovies();
-      cachedPlaylist = buildM3U(movies);
-      cachedTotalCount = totalCount;
-      console.log(`Playlist built with ${movies.length} items.`);
+      const newPlaylist = buildM3U(movies);
+
+      // Only update cache if we have at least one valid entry
+      if (newPlaylist.trim() !== '#EXTM3U') {
+        cachedPlaylist = newPlaylist;
+        cachedTotalCount = totalCount;
+        console.log(`Cache updated with ${totalCount} total items.`);
+      } else {
+        console.error('Playlist would be empty – not updating cache. Old cache kept (if any).');
+      }
     } else {
       console.log('Count unchanged, using cached playlist.');
     }
   } catch (error) {
     console.error('Error updating playlist:', error.message);
-    // If cache exists, keep serving old cache
   }
 }
 
-// Schedule daily update at 12:00 AM IST (Asia/Kolkata)
+// Schedule daily update at 12:00 AM IST
 cron.schedule('0 0 * * *', () => {
   console.log('Running scheduled daily update...');
   updatePlaylistIfNeeded();
@@ -169,10 +183,9 @@ updatePlaylistIfNeeded().catch(err => console.error('Initial update failed:', er
 app.get('/hindi.m3u', (req, res) => {
   if (cachedPlaylist) {
     res.setHeader('Content-Type', 'audio/x-mpegurl');
-    res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour (CDN/browser)
+    res.setHeader('Cache-Control', 'public, max-age=3600');
     res.send(cachedPlaylist);
   } else {
-    // If no cache yet, respond with 503 and ask to retry
     res.status(503).send('Playlist is being generated. Please try again shortly.');
   }
 });
