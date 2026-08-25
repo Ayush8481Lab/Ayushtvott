@@ -1,0 +1,14 @@
+{
+  "name": "mxplayer-hindi-m3u",
+  "version": "1.0.0",
+  "description": "Serve daily updated M3U playlist of Hindi movies from MX Player",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.7",
+    "express": "^4.18.2",
+    "node-cron": "^3.0.3"
+  }
+}
