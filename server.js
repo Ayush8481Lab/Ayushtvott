@@ -6,7 +6,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ─── API CONFIGURATION ───────────────────────────────────────────
-const API_BASE = 'https://api.mxplayer.in/v1/web/detail/browseItem';
+const API_BASE = 'https://tv.wapgotube.workers.dev/proxy/https://api.mxplayer.in/v1/web/detail/browseItem';
 
 // Build query string in EXACT order as provided, with leading `&`
 function buildApiUrl(pageNum, pageSize) {
