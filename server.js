@@ -9,7 +9,6 @@ const PORT = process.env.PORT || 3000;
 const PROXY_BASE = 'https://ayushproxy-blue.vercel.app/api/proxy/';
 const API_TARGET_BASE = 'https://api.mxplayer.in/v1/web/detail/browseItem';
 
-// Build browse URL with exact parameter order
 function buildBrowseUrl(pageNum, pageSize, type, genreFilterId = null) {
   let query = `pageNum=${pageNum}&pageSize=${pageSize}&isCustomized=true`;
   if (genreFilterId) {
@@ -149,27 +148,6 @@ async function fetchEpisodeDetailsInBatches(episodeIds, onProgress) {
   return results;
 }
 
-function extractFirstEpisodeWithStream(showDetail) {
-  if (!showDetail.seasons || showDetail.seasons.length === 0) return null;
-  const seasons = [...showDetail.seasons].sort((a, b) => a.seasonNumber - b.seasonNumber);
-  for (const season of seasons) {
-    if (!season.episodes || season.episodes.length === 0) continue;
-    const episodes = [...season.episodes].sort((a, b) => a.episodeNo - b.episodeNo);
-    for (const ep of episodes) {
-      if (ep.stream) {
-        return {
-          seasonNumber: season.seasonNumber,
-          episodeNo: ep.episodeNo,
-          title: ep.title,
-          stream: ep.stream,
-          imageInfo: ep.imageInfo
-        };
-      }
-    }
-  }
-  return null;
-}
-
 // ─── BUILD MOVIES PLAYLIST ───────────────────────────────────────
 function buildMoviesM3U(movies) {
   const lines = ['#EXTM3U'];
@@ -191,7 +169,7 @@ function buildMoviesM3U(movies) {
   return { playlist: lines.join('\n'), validCount };
 }
 
-// ─── PROCESS ONE GENRE ──────────────────────────────────────────
+// ─── PROCESS ONE GENRE (ALL EPISODES) ───────────────────────────
 async function processGenre(genre) {
   showJobs[genre.name] = {
     status: 'processing',
@@ -204,7 +182,8 @@ async function processGenre(genre) {
 
   try {
     const { items: shows, totalCount } = await fetchAllItems(2, genre.filterId);
-    // Extract episode IDs from firstVideo.id (only those where type is 'episode')
+
+    // Extract episode IDs from firstVideo.id (only those with type 'episode')
     const episodeIdToShowMap = new Map();
     for (const show of shows) {
       if (show.firstVideo && show.firstVideo.type === 'episode' && show.firstVideo.id) {
@@ -239,9 +218,9 @@ async function processGenre(genre) {
     }
 
     const lines = ['#EXTM3U'];
-    let validCount = 0;
+    let validEpisodeCount = 0;
     let missingDetails = 0;
-    let missingStream = 0;
+    let missingStreamEpisodes = 0;
 
     for (const [episodeId, show] of episodeIdToShowMap) {
       const detail = episodeDetailMap[episodeId];
@@ -250,39 +229,40 @@ async function processGenre(genre) {
         continue;
       }
 
-      const firstEpisode = extractFirstEpisodeWithStream(detail);
-      if (!firstEpisode) {
-        missingStream++;
-        continue;
-      }
+      // Iterate through all seasons and episodes
+      if (!detail.seasons) continue;
+      for (const season of detail.seasons) {
+        if (!season.episodes) continue;
+        for (const episode of season.episodes) {
+          const streamUrl = buildStreamUrl(episode);
+          if (!streamUrl) {
+            missingStreamEpisodes++;
+            continue;
+          }
 
-      const streamUrl = buildStreamUrl(firstEpisode);
-      if (!streamUrl) {
-        missingStream++;
-        continue;
-      }
+          let logo = '';
+          const landscape = episode.imageInfo?.find(img => img.type === 'landscape');
+          if (landscape && landscape.url) {
+            logo = buildImageUrl(landscape.url);
+          }
 
-      let logo = '';
-      const landscape = firstEpisode.imageInfo?.find(img => img.type === 'landscape');
-      if (landscape && landscape.url) {
-        logo = buildImageUrl(landscape.url);
+          const title = `${show.title} - S${season.seasonNumber}E${episode.episodeNo} - ${episode.title}`;
+          lines.push(`#EXTINF:-1 tvg-id="${show.id}" tvg-logo="${logo}" group-title="${genre.name}", ${title}`);
+          lines.push(`${streamUrl}#.mp4`);
+          validEpisodeCount++;
+        }
       }
-
-      const title = `${show.title} - S${firstEpisode.seasonNumber}E${firstEpisode.episodeNo} - ${firstEpisode.title}`;
-      lines.push(`#EXTINF:-1 tvg-id="${show.id}" tvg-logo="${logo}" group-title="${genre.name}", ${title}`);
-      lines.push(`${streamUrl}#.mp4`);
-      validCount++;
     }
 
-    console.log(`[SHOWS:${genre.name}] valid entries: ${validCount}, missing details: ${missingDetails}, missing stream/episode: ${missingStream}`);
+    console.log(`[SHOWS:${genre.name}] valid episodes: ${validEpisodeCount}, missing details: ${missingDetails}, missing stream episodes: ${missingStreamEpisodes}`);
 
     const playlist = lines.join('\n');
-    cache.shows[genre.name] = { playlist, totalCount: validCount };
+    cache.shows[genre.name] = { playlist, totalCount: validEpisodeCount };
     showJobs[genre.name].status = 'done';
     showJobs[genre.name].completedShows = episodeIds.length;
     showJobs[genre.name].lastProcessed = new Date().toISOString();
     showJobs[genre.name].playlist = playlist;
-    showJobs[genre.name].validCount = validCount;
+    showJobs[genre.name].validEpisodeCount = validEpisodeCount;
   } catch (err) {
     console.error(`[SHOWS:${genre.name}] processing error:`, err.message);
     showJobs[genre.name].status = 'error';
