@@ -11,7 +11,7 @@ const PROXY_BASE = 'https://ayushproxy-blue.vercel.app/api/proxy/';
 // ─── API TARGET PARAMETERS (exact order) ─────────────────────────
 const API_TARGET_BASE = 'https://api.mxplayer.in/v1/web/detail/browseItem';
 const QUERY_PARAMS = [
-  ['pageNum', ''],           // placeholder, will be set per request
+  ['pageNum', ''],
   ['pageSize', ''],
   ['isCustomized', 'true'],
   ['browseLangFilterIds', 'hi'],
@@ -23,7 +23,6 @@ const QUERY_PARAMS = [
   ['kids-mode-enabled', 'false']
 ];
 
-// Build the exact target URL (with query) and then wrap in proxy
 function buildProxyUrl(pageNum, pageSize) {
   const queryParts = QUERY_PARAMS.map(([key, val]) => {
     if (key === 'pageNum') return `pageNum=${pageNum}`;
@@ -32,7 +31,6 @@ function buildProxyUrl(pageNum, pageSize) {
   });
   const targetQuery = queryParts.join('&');
   const targetUrl = `${API_TARGET_BASE}?${targetQuery}`;
-  // Replace "https://" with "https:/" (one slash) for proxy path
   const proxyPath = targetUrl.replace('https://', 'https:/');
   return `${PROXY_BASE}${proxyPath}`;
 }
@@ -42,8 +40,7 @@ let cachedPlaylist = null;
 let cachedTotalCount = null;
 let isBuilding = false;
 
-// ─── HELPERS (matching frontend logic) ──────────────────────────
-// Image URL: same as getCastImageUrl, but with optional size replacement
+// ─── HELPERS ──────────────────────────────────────────────────────
 function buildImageUrl(imagePath, size = null) {
   if (!imagePath) return '';
   if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
@@ -51,28 +48,38 @@ function buildImageUrl(imagePath, size = null) {
   }
   let path = imagePath.startsWith('/') ? imagePath.slice(1) : imagePath;
 
-  // If size provided and path contains a dimension like "160x240", replace it
-  if (size && /\/\d+x\d+\//.test(path)) {
-    path = path.replace(/\/\d+x\d+\//, `/${size}/`);
+  if (size) {
+    const matches = [...path.matchAll(/\d+x\d+/g)];
+    if (matches.length > 0) {
+      const lastMatch = matches[matches.length - 1];
+      const { index, 0: match } = lastMatch;
+      path = path.slice(0, index) + size + path.slice(index + match.length);
+    }
   }
+
   return `https://qqcdnpictest.mxplay.com/${path}`;
 }
 
-// Stream URL: exactly like getStreamUrl from React, plus videoHash fallback
+// Updated stream URL builder: prioritizes DASH (.mpd)
 function buildStreamUrl(item) {
   const stream = item.stream;
   if (!stream) return '';
 
-  let path = stream.thirdParty?.hlsUrl ||
-             stream.thirdParty?.webHlsUrl ||
-             stream.hls?.high ||
-             stream.hls?.main ||
-             stream.mxplay?.hls?.high;
+  let path = stream.thirdParty?.dashUrl ||
+             stream.dash?.high ||
+             stream.dash?.main ||
+             stream.mxplay?.dash?.high;
 
-  // Fallback: if no explicit HLS URL, try to construct one from videoHash
+  if (!path) {
+    path = stream.thirdParty?.hlsUrl ||
+           stream.thirdParty?.webHlsUrl ||
+           stream.hls?.high ||
+           stream.hls?.main ||
+           stream.mxplay?.hls?.high;
+  }
+
   if (!path && stream.videoHash) {
-    // The working sample uses version "1"; this is a reasonable default
-    path = `video/${stream.videoHash}/1/hls/h264_high.m3u8`;
+    path = `video/${stream.videoHash}/2/dash/h264_high.mpd`;
   }
 
   if (!path) return '';
@@ -83,9 +90,9 @@ function buildStreamUrl(item) {
   return `https://d3sgzbosmwirao.cloudfront.net/${path}`;
 }
 
-// ─── FETCH TOTAL COUNT (lightweight) ─────────────────────────────
+// ─── FETCH TOTAL COUNT ───────────────────────────────────────────
 async function fetchTotalCount() {
-  const url = buildProxyUrl(0, 2); // pageSize=2 for fast count
+  const url = buildProxyUrl(0, 2);
   console.log(`[CHECK] ${url}`);
   const response = await axios.get(url, { timeout: 12000 });
   const total = response.data.totalCount;
@@ -93,11 +100,11 @@ async function fetchTotalCount() {
   return total;
 }
 
-// ─── FETCH ALL MOVIES (paginated) ───────────────────────────────
+// ─── FETCH ALL MOVIES ────────────────────────────────────────────
 async function fetchAllMovies() {
   const allMovies = [];
   let pageNum = 0;
-  const pageSize = 100;               // heavy pages
+  const pageSize = 100;
   let totalCount = null;
 
   while (true) {
@@ -144,13 +151,11 @@ function buildM3U(movies) {
     const id = movie.id || '';
     let logo = '';
 
-    // Use portrait_large image if available, else any image
     const portraitLarge = movie.imageInfo?.find(img => img.type === 'portrait_large');
     const anyImage = movie.imageInfo?.find(img => img.url);
     const imageInfo = portraitLarge || anyImage;
 
     if (imageInfo && imageInfo.url) {
-      // Get 320x480 version (if original is 160x240, it will be replaced)
       logo = buildImageUrl(imageInfo.url, '320x480');
     }
 
@@ -205,7 +210,7 @@ async function updatePlaylistIfNeeded(forceRebuild = false) {
   }
 }
 
-// ─── SCHEDULE DAILY UPDATE AT 12:00 AM IST ───────────────────────
+// ─── SCHEDULE DAILY UPDATE ───────────────────────────────────────
 cron.schedule('0 0 * * *', () => {
   console.log('[CRON] daily update triggered');
   updatePlaylistIfNeeded();
