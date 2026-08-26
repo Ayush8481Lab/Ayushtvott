@@ -58,7 +58,7 @@ function buildImageUrl(imagePath, size = null) {
   return `https://qqcdnpictest.mxplay.com/${path}`;
 }
 
-// Stream URL: exactly like getStreamUrl from React
+// Stream URL: exactly like getStreamUrl from React, plus videoHash fallback
 function buildStreamUrl(item) {
   const stream = item.stream;
   if (!stream) return '';
@@ -68,6 +68,12 @@ function buildStreamUrl(item) {
              stream.hls?.high ||
              stream.hls?.main ||
              stream.mxplay?.hls?.high;
+
+  // Fallback: if no explicit HLS URL, try to construct one from videoHash
+  if (!path && stream.videoHash) {
+    // The working sample uses version "1"; this is a reasonable default
+    path = `video/${stream.videoHash}/1/hls/h264_high.m3u8`;
+  }
 
   if (!path) return '';
   if (path.startsWith('http://') || path.startsWith('https://')) {
