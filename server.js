@@ -22,25 +22,37 @@ function buildBrowseUrl(pageNum, pageSize, type, genreFilterId = null) {
 
 // ─── CACHES & JOB STATUS ────────────────────────────────────────
 const cache = {
-  movies: { playlist: null, totalCount: null },
-  shows: {} // genre name -> { playlist, totalCount }
+  movies: { playlist: null, totalCount: null },                 // all Hindi movies
+  movieGenres: {},                                              // genre name -> { playlist, totalCount }
+  shows: {}                                                     // genre name -> { playlist, totalCount }
 };
 
-const showJobs = {}; // genre -> { status, totalShows, completedShows, lastProcessed, playlist, error? }
-
+const showJobs = {};  // genre -> { status, totalShows, completedShows, lastProcessed, playlist, error? }
 let isBuildingMovies = false;
 
-// ─── GENRE DEFINITIONS ──────────────────────────────────────────
-const genres = [
-  { name: 'Romance', filterId: '1dfb3454a9898389b8eae7ba7d664bc0', endpoint: '/romance.m3u' },
-  { name: 'Drama', filterId: '48efa872f6f17facebf6149dfc536ee1', endpoint: '/drama.m3u' },
-  { name: 'Comedy', filterId: 'a24ddcadde26310ddfdb674e09e38eb5', endpoint: '/comedy.m3u' },
-  { name: 'Thriller', filterId: '2dd5daf25be5619543524f360c73c3d8', endpoint: '/thriller.m3u' },
-  { name: 'Crime', filterId: 'b413dff55bdad743c577a8bea3b65044', endpoint: '/crime.m3u' },
-  { name: 'Horror', filterId: '2bab9af055150068ef74b58163dc638b', endpoint: '/horror.m3u' },
-  { name: 'Action', filterId: '426ce788509fd7ac2814ae1639907fe3', endpoint: '/action.m3u' },
-  { name: 'Reality Show', filterId: 'd63bdd9c0381a0cdd1e38a3cc9439e2c', endpoint: '/reality.m3u' },
-  { name: 'K Drama', filterId: '0681d37530f4e2a8fc1f99bce0b707e4', endpoint: '/kdrama.m3u' }
+// ─── MOVIE GENRE DEFINITIONS ────────────────────────────────────
+const movieGenres = [
+  { name: 'Romance',   filterId: 'dd1bbd57f60ddcb366d3c0c419c1ef16', endpoint: '/movie-romance.m3u' },
+  { name: 'Comedy',    filterId: '5492e591ea1ce9038c80c8c2c1b797f7', endpoint: '/movie-comedy.m3u' },
+  { name: 'Action',    filterId: '72c7a3098399dfb77a42f5181b46fa41', endpoint: '/movie-action.m3u' },
+  { name: 'Crime',     filterId: '52175868f778ec20e0103a06299cbb6c', endpoint: '/movie-crime.m3u' },
+  { name: 'Horror',    filterId: '2bfe89ac78ecfc9330fb01a6303a49c8', endpoint: '/movie-horror.m3u' },
+  { name: 'Animation', filterId: '2e5274cb97ea3c30073c6aebf6e8965e', endpoint: '/movie-animation.m3u' },
+  { name: 'Thriller',  filterId: 'e226765da2e105f06b058d3049a10757', endpoint: '/movie-thriller.m3u' },
+  { name: 'Mystery',   filterId: '98ebb0f782f3700f1f22cf52e3e5526f', endpoint: '/movie-mystery.m3u' }
+];
+
+// ─── SHOW GENRE DEFINITIONS ─────────────────────────────────────
+const showGenres = [
+  { name: 'Romance',     filterId: '1dfb3454a9898389b8eae7ba7d664bc0', endpoint: '/romance.m3u' },
+  { name: 'Drama',       filterId: '48efa872f6f17facebf6149dfc536ee1', endpoint: '/drama.m3u' },
+  { name: 'Comedy',      filterId: 'a24ddcadde26310ddfdb674e09e38eb5', endpoint: '/comedy.m3u' },
+  { name: 'Thriller',    filterId: '2dd5daf25be5619543524f360c73c3d8', endpoint: '/thriller.m3u' },
+  { name: 'Crime',       filterId: 'b413dff55bdad743c577a8bea3b65044', endpoint: '/crime.m3u' },
+  { name: 'Horror',      filterId: '2bab9af055150068ef74b58163dc638b', endpoint: '/horror.m3u' },
+  { name: 'Action',      filterId: '426ce788509fd7ac2814ae1639907fe3', endpoint: '/action.m3u' },
+  { name: 'Reality Show',filterId: 'd63bdd9c0381a0cdd1e38a3cc9439e2c', endpoint: '/reality.m3u' },
+  { name: 'K Drama',     filterId: '0681d37530f4e2a8fc1f99bce0b707e4', endpoint: '/kdrama.m3u' }
 ];
 
 // ─── HELPERS ─────────────────────────────────────────────────────
@@ -109,7 +121,7 @@ async function fetchAllItems(type, genreFilterId = null) {
   return { items: allItems, totalCount };
 }
 
-// Fetch episode details using firstVideo.id (episode id) in batches of 5 with delay
+// Fetch episode details using firstVideo.id in batches of 5 with delay
 async function fetchEpisodeDetailsInBatches(episodeIds, onProgress) {
   const baseUrl = 'https://mxplayer-dun.vercel.app/api/service';
   const batchSize = 5;
@@ -148,8 +160,8 @@ async function fetchEpisodeDetailsInBatches(episodeIds, onProgress) {
   return results;
 }
 
-// ─── BUILD MOVIES PLAYLIST ───────────────────────────────────────
-function buildMoviesM3U(movies) {
+// ─── BUILD MOVIES PLAYLIST (with group title parameter) ─────────
+function buildMoviesM3U(movies, groupTitle) {
   const lines = ['#EXTM3U'];
   let validCount = 0;
   for (const movie of movies) {
@@ -161,16 +173,16 @@ function buildMoviesM3U(movies) {
     const anyImage = movie.imageInfo?.find(img => img.url);
     const imageInfo = portraitLarge || anyImage;
     if (imageInfo) logo = buildImageUrl(imageInfo.url);
-    lines.push(`#EXTINF:-1 tvg-id="${id}" tvg-logo="${logo}" group-title="Movies", ${movie.title}`);
+    lines.push(`#EXTINF:-1 tvg-id="${id}" tvg-logo="${logo}" group-title="${groupTitle}", ${movie.title}`);
     lines.push(`${streamUrl}#.mp4`);
     validCount++;
   }
-  console.log(`[MOVIES] built ${validCount} entries`);
+  console.log(`[MOVIES:${groupTitle}] built ${validCount} entries`);
   return { playlist: lines.join('\n'), validCount };
 }
 
-// ─── PROCESS ONE GENRE (ALL EPISODES) ───────────────────────────
-async function processGenre(genre) {
+// ─── PROCESS ONE SHOW GENRE (ALL EPISODES) ──────────────────────
+async function processShowGenre(genre) {
   showJobs[genre.name] = {
     status: 'processing',
     totalShows: 0,
@@ -181,9 +193,8 @@ async function processGenre(genre) {
   };
 
   try {
-    const { items: shows, totalCount } = await fetchAllItems(2, genre.filterId);
+    const { items: shows } = await fetchAllItems(2, genre.filterId);
 
-    // Extract episode IDs from firstVideo.id (only those with type 'episode')
     const episodeIdToShowMap = new Map();
     for (const show of shows) {
       if (show.firstVideo && show.firstVideo.type === 'episode' && show.firstVideo.id) {
@@ -193,7 +204,7 @@ async function processGenre(genre) {
 
     const episodeIds = [...episodeIdToShowMap.keys()];
     showJobs[genre.name].totalShows = episodeIds.length;
-    console.log(`[SHOWS:${genre.name}] total shows with valid firstVideo = ${episodeIds.length}`);
+    console.log(`[SHOWS:${genre.name}] total shows = ${episodeIds.length}`);
 
     if (episodeIds.length === 0) {
       showJobs[genre.name].status = 'done';
@@ -211,7 +222,6 @@ async function processGenre(genre) {
       return;
     }
 
-    // Map by episode id (showId in response == the episode id we sent)
     const episodeDetailMap = {};
     for (const detail of episodeDetailsArray) {
       episodeDetailMap[detail.showId] = detail;
@@ -219,26 +229,17 @@ async function processGenre(genre) {
 
     const lines = ['#EXTM3U'];
     let validEpisodeCount = 0;
-    let missingDetails = 0;
-    let missingStreamEpisodes = 0;
 
     for (const [episodeId, show] of episodeIdToShowMap) {
       const detail = episodeDetailMap[episodeId];
-      if (!detail) {
-        missingDetails++;
-        continue;
-      }
+      if (!detail) continue;
 
-      // Iterate through all seasons and episodes
       if (!detail.seasons) continue;
       for (const season of detail.seasons) {
         if (!season.episodes) continue;
         for (const episode of season.episodes) {
           const streamUrl = buildStreamUrl(episode);
-          if (!streamUrl) {
-            missingStreamEpisodes++;
-            continue;
-          }
+          if (!streamUrl) continue;
 
           let logo = '';
           const landscape = episode.imageInfo?.find(img => img.type === 'landscape');
@@ -247,14 +248,14 @@ async function processGenre(genre) {
           }
 
           const title = `${show.title} - S${season.seasonNumber}E${episode.episodeNo} - ${episode.title}`;
-          lines.push(`#EXTINF:-1 tvg-id="${show.id}" tvg-logo="${logo}" group-title="${genre.name}", ${title}`);
+          lines.push(`#EXTINF:-1 tvg-id="${show.id}" tvg-logo="${logo}" group-title="TV Show || ${genre.name}", ${title}`);
           lines.push(`${streamUrl}#.mp4`);
           validEpisodeCount++;
         }
       }
     }
 
-    console.log(`[SHOWS:${genre.name}] valid episodes: ${validEpisodeCount}, missing details: ${missingDetails}, missing stream episodes: ${missingStreamEpisodes}`);
+    console.log(`[SHOWS:${genre.name}] valid episodes = ${validEpisodeCount}`);
 
     const playlist = lines.join('\n');
     cache.shows[genre.name] = { playlist, totalCount: validEpisodeCount };
@@ -271,17 +272,30 @@ async function processGenre(genre) {
   }
 }
 
-// ─── UPDATE MOVIES (automatic) ──────────────────────────────────
-async function updateMovies() {
+// ─── UPDATE ALL MOVIES (all + genres) ───────────────────────────
+async function updateAllMovies() {
   if (isBuildingMovies) return;
   isBuildingMovies = true;
   try {
-    const total = await fetchTotalCount(1);
-    if (cache.movies.playlist === null || cache.movies.totalCount !== total) {
-      console.log('[MOVIES] rebuilding...');
+    // 1. All Hindi movies (group title "All Hindi Movie")
+    const totalAll = await fetchTotalCount(1);
+    if (cache.movies.playlist === null || cache.movies.totalCount !== totalAll) {
+      console.log('[MOVIES] rebuilding all Hindi movies...');
       const { items } = await fetchAllItems(1);
-      const { playlist } = buildMoviesM3U(items);
-      cache.movies = { playlist, totalCount: total };
+      const { playlist } = buildMoviesM3U(items, 'All Hindi Movie');
+      cache.movies = { playlist, totalCount: totalAll };
+    }
+
+    // 2. Each movie genre (separate endpoints)
+    for (const genre of movieGenres) {
+      const totalGenre = await fetchTotalCount(1, genre.filterId);
+      const cacheKey = genre.name;
+      if (!cache.movieGenres[cacheKey] || cache.movieGenres[cacheKey].totalCount !== totalGenre) {
+        console.log(`[MOVIES:${genre.name}] rebuilding...`);
+        const { items } = await fetchAllItems(1, genre.filterId);
+        const { playlist } = buildMoviesM3U(items, `MOVIE || ${genre.name}`);
+        cache.movieGenres[cacheKey] = { playlist, totalCount: totalGenre };
+      }
     }
   } catch (err) {
     console.error('[MOVIES] update error:', err.message);
@@ -290,22 +304,22 @@ async function updateMovies() {
   }
 }
 
-// ─── SCHEDULE MOVIES UPDATE ─────────────────────────────────────
+// ─── SCHEDULE MOVIES UPDATE (12:00 AM IST) ──────────────────────
 cron.schedule('0 0 * * *', () => {
   console.log('[CRON] Movies update');
-  updateMovies();
+  updateAllMovies();
 }, { timezone: 'Asia/Kolkata' });
 
 // Initial movies build on startup
-updateMovies().catch(err => console.error('[STARTUP] Movies build failed:', err));
+updateAllMovies().catch(err => console.error('[STARTUP] Movies build failed:', err));
 
 // ─── ROUTES ──────────────────────────────────────────────────────
 app.get('/trigger/:genre', (req, res) => {
   const genreName = req.params.genre;
-  const genre = genres.find(g => g.name.toLowerCase() === genreName.toLowerCase());
+  const genre = showGenres.find(g => g.name.toLowerCase() === genreName.toLowerCase());
 
   if (!genre) {
-    return res.status(404).json({ error: 'Genre not found' });
+    return res.status(404).json({ error: 'Show genre not found' });
   }
 
   const job = showJobs[genre.name];
@@ -318,7 +332,7 @@ app.get('/trigger/:genre', (req, res) => {
     });
   }
 
-  processGenre(genre).catch(err => console.error(`[TRIGGER] ${genre.name} failed:`, err));
+  processShowGenre(genre).catch(err => console.error(`[TRIGGER] ${genre.name} failed:`, err));
 
   return res.json({
     status: 'started',
@@ -329,15 +343,15 @@ app.get('/trigger/:genre', (req, res) => {
 
 app.get('/status/:genre', (req, res) => {
   const genreName = req.params.genre;
-  const genre = genres.find(g => g.name.toLowerCase() === genreName.toLowerCase());
-  if (!genre) return res.status(404).json({ error: 'Genre not found' });
+  const genre = showGenres.find(g => g.name.toLowerCase() === genreName.toLowerCase());
+  if (!genre) return res.status(404).json({ error: 'Show genre not found' });
 
   const job = showJobs[genre.name];
   if (!job) return res.json({ status: 'idle' });
   return res.json(job);
 });
 
-// Movies playlist
+// All Hindi movies
 app.get('/hindi.m3u', (req, res) => {
   if (cache.movies.playlist) {
     res.setHeader('Content-Type', 'audio/x-mpegurl');
@@ -348,8 +362,22 @@ app.get('/hindi.m3u', (req, res) => {
   }
 });
 
-// Genre playlist endpoints
-for (const genre of genres) {
+// Movie genre endpoints
+for (const genre of movieGenres) {
+  app.get(genre.endpoint, (req, res) => {
+    const genreCache = cache.movieGenres[genre.name];
+    if (genreCache && genreCache.playlist) {
+      res.setHeader('Content-Type', 'audio/x-mpegurl');
+      res.setHeader('Cache-Control', 'public, max-age=1800');
+      res.send(genreCache.playlist);
+    } else {
+      res.status(503).send('Playlist is being generated. Please try again shortly.');
+    }
+  });
+}
+
+// Show genre endpoints
+for (const genre of showGenres) {
   app.get(genre.endpoint, (req, res) => {
     const genreCache = cache.shows[genre.name];
     if (genreCache && genreCache.playlist) {
@@ -362,19 +390,32 @@ for (const genre of genres) {
   });
 }
 
-// Combined index
+// Combined index: All Hindi Movie + movie genres + all shows
 app.get('/index.m3u', (req, res) => {
   if (cache.movies.playlist) {
     let combined = '#EXTM3U\n';
     combined += cache.movies.playlist + '\n';
-    for (const genre of genres) {
-      const genreCache = cache.shows[genre.name];
-      if (genreCache && genreCache.playlist && genreCache.playlist.trim() !== '#EXTM3U') {
-        const lines = genreCache.playlist.split('\n');
+
+    // Movie genres
+    for (const genre of movieGenres) {
+      const gc = cache.movieGenres[genre.name];
+      if (gc && gc.playlist && gc.playlist.trim() !== '#EXTM3U') {
+        const lines = gc.playlist.split('\n');
         if (lines[0] === '#EXTM3U') lines.shift();
         combined += lines.join('\n') + '\n';
       }
     }
+
+    // Shows
+    for (const genre of showGenres) {
+      const gc = cache.shows[genre.name];
+      if (gc && gc.playlist && gc.playlist.trim() !== '#EXTM3U') {
+        const lines = gc.playlist.split('\n');
+        if (lines[0] === '#EXTM3U') lines.shift();
+        combined += lines.join('\n') + '\n';
+      }
+    }
+
     res.setHeader('Content-Type', 'audio/x-mpegurl');
     res.setHeader('Cache-Control', 'public, max-age=1800');
     res.send(combined);
@@ -388,10 +429,11 @@ app.get('/', (req, res) => {
     <h1>MX Player M3U Service</h1>
     <p>Available endpoints:</p>
     <ul>
-      <li><a href="/hindi.m3u">/hindi.m3u</a> (movies)</li>
-      <li><a href="/index.m3u">/index.m3u</a> (movies + all processed shows)</li>
-      <li>Show genre playlists: /romance.m3u, /drama.m3u, /comedy.m3u, /thriller.m3u, /crime.m3u, /horror.m3u, /action.m3u, /reality.m3u, /kdrama.m3u</li>
-      <li>Trigger processing: /trigger/Romance, /trigger/Drama, etc.</li>
+      <li><a href="/hindi.m3u">/hindi.m3u</a> (All Hindi Movie)</li>
+      <li>Movie genres: /movie-romance.m3u, /movie-comedy.m3u, /movie-action.m3u, /movie-crime.m3u, /movie-horror.m3u, /movie-animation.m3u, /movie-thriller.m3u, /movie-mystery.m3u</li>
+      <li>Show genres: /romance.m3u, /drama.m3u, /comedy.m3u, /thriller.m3u, /crime.m3u, /horror.m3u, /action.m3u, /reality.m3u, /kdrama.m3u</li>
+      <li>Trigger show processing: /trigger/Romance, /trigger/Drama, etc.</li>
+      <li><a href="/index.m3u">/index.m3u</a> (All Hindi Movie + Movie genres + TV shows)</li>
     </ul>
   `);
 });
