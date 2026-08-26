@@ -8,17 +8,16 @@ const PORT = process.env.PORT || 3000;
 // ─── PROXY CONFIGURATION ─────────────────────────────────────────
 const PROXY_BASE = 'https://ayushproxy-blue.vercel.app/api/proxy/';
 
-// ─── API TARGET PARAMETERS (exact order) ─────────────────────────
+// ─── API TARGET PARAMETERS ───────────────────────────────────────
 const API_TARGET_BASE = 'https://api.mxplayer.in/v1/web/detail/browseItem';
 
-// Helper to build proxy URL with optional extra query params
 function buildProxyUrl(pageNum, pageSize, extraParams = {}) {
   const queryParts = [
     ['pageNum', pageNum],
     ['pageSize', pageSize],
     ['isCustomized', 'true'],
     ['browseLangFilterIds', 'hi'],
-    ['type', '1'],                  // default type, will be overridden if extraParams includes type
+    ['type', '1'],
     ['device-density', '1'],
     ['userid', '6d4a1a2c-5f2a-4f46-be26-901f8801dc88'],
     ['platform', 'com.mxplay.mobile'],
@@ -26,13 +25,11 @@ function buildProxyUrl(pageNum, pageSize, extraParams = {}) {
     ['kids-mode-enabled', 'false']
   ];
 
-  // Override or add extra params (like genreFilterIds, type)
   for (const [key, value] of Object.entries(extraParams)) {
     const existingIndex = queryParts.findIndex(([k]) => k === key);
     if (existingIndex !== -1) {
       queryParts[existingIndex][1] = value;
     } else {
-      // Insert before kids-mode-enabled to maintain order roughly
       queryParts.splice(queryParts.length - 1, 0, [key, value]);
     }
   }
@@ -43,33 +40,27 @@ function buildProxyUrl(pageNum, pageSize, extraParams = {}) {
   return `${PROXY_BASE}${proxyPath}`;
 }
 
-// ─── IN-MEMORY CACHES ───────────────────────────────────────────
-let cachedMoviesPlaylist = null;
-let cachedMoviesTotalCount = null;
-let cachedShowsPlaylist = null;
-let cachedShowsTotalCount = null;
-let isBuildingMovies = false;
-let isBuildingShows = false;
+// ─── CACHES ──────────────────────────────────────────────────────
+const cache = {
+  movies: { playlist: null, totalCount: null },
+  shows: {} // genre name -> { playlist, totalCount }
+};
+let isBuilding = { movies: false, shows: {} };
 
-// ─── HELPERS (same as before) ──────────────────────────────────
+// ─── HELPERS ─────────────────────────────────────────────────────
 function buildImageUrl(imagePath) {
   if (!imagePath) return '';
-  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
-    return imagePath;
-  }
+  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) return imagePath;
   return `https://qqcdnpictest.mxplay.com/${imagePath.startsWith('/') ? imagePath.slice(1) : imagePath}`;
 }
 
-// Stream URL: DASH priority, HLS fallback, videoHash fallback
 function buildStreamUrl(item) {
   const stream = item.stream;
   if (!stream) return '';
-
   let path = stream.thirdParty?.dashUrl ||
              stream.dash?.high ||
              stream.dash?.main ||
              stream.mxplay?.dash?.high;
-
   if (!path) {
     path = stream.thirdParty?.hlsUrl ||
            stream.thirdParty?.webHlsUrl ||
@@ -77,32 +68,26 @@ function buildStreamUrl(item) {
            stream.hls?.main ||
            stream.mxplay?.hls?.high;
   }
-
   if (!path && stream.videoHash) {
     path = `video/${stream.videoHash}/2/dash/h264_high.mpd`;
   }
-
   if (!path) return '';
-  if (path.startsWith('http://') || path.startsWith('https://')) {
-    return path;
-  }
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
   path = path.startsWith('/') ? path.slice(1) : path;
   return `https://d3sgzbosmwirao.cloudfront.net/${path}`;
 }
 
-// ─── FETCH TOTAL COUNT (lightweight) for a given type/genre ────
+// Fetch total count for movies or shows
 async function fetchTotalCount(type, genreFilterId = null) {
   const extra = { type: type };
   if (genreFilterId) extra.genreFilterIds = genreFilterId;
   const url = buildProxyUrl(0, 2, extra);
   console.log(`[CHECK] ${url}`);
   const response = await axios.get(url, { timeout: 12000 });
-  const total = response.data.totalCount;
-  console.log(`[CHECK] totalCount = ${total}`);
-  return total;
+  return response.data.totalCount;
 }
 
-// ─── FETCH ALL ITEMS (paginated) for movies or shows ────────────
+// Fetch all items (paginated)
 async function fetchAllItems(type, genreFilterId = null) {
   const allItems = [];
   let pageNum = 0;
@@ -126,217 +111,150 @@ async function fetchAllItems(type, genreFilterId = null) {
     console.log(`[FETCH] page ${pageNum}: got ${items.length} items`);
     allItems.push(...items);
 
-    if (items.length === 0 || allItems.length >= totalCount) {
-      break;
-    }
+    if (items.length === 0 || allItems.length >= totalCount) break;
     pageNum++;
-
-    if (pageNum > 200) {
-      console.error('[FETCH] too many pages, aborting');
-      break;
-    }
+    if (pageNum > 200) break;
   }
-
   return { items: allItems, totalCount };
 }
 
-// ─── BUILD MOVIES M3U PLAYLIST ─────────────────────────────────
-function buildMoviesM3U(movies) {
-  const lines = ['#EXTM3U'];
-  let validCount = 0;
-
-  for (const movie of movies) {
-    const streamUrl = buildStreamUrl(movie);
-    if (!streamUrl) {
-      console.warn(`[MOVIES] skipping "${movie.title}" - no stream`);
-      continue;
-    }
-
-    const id = movie.id || '';
-    let logo = '';
-
-    const portraitLarge = movie.imageInfo?.find(img => img.type === 'portrait_large');
-    const anyImage = movie.imageInfo?.find(img => img.url);
-    const imageInfo = portraitLarge || anyImage;
-
-    if (imageInfo && imageInfo.url) {
-      logo = buildImageUrl(imageInfo.url);
-    }
-
-    const title = movie.title || 'Unknown';
-    lines.push(`#EXTINF:-1 tvg-id="${id}" tvg-logo="${logo}" group-title="Movies", ${title}`);
-    lines.push(`${streamUrl}#.mp4`);
-    validCount++;
-  }
-
-  console.log(`[MOVIES] created ${validCount} valid entries out of ${movies.length} items`);
-  return { playlist: lines.join('\n'), validCount };
-}
-
-// ─── EPISODE SERVICE BATCH FETCH (with delay) ──────────────────
-async function fetchEpisodeDetails(episodeIds) {
+// ─── EPISODE SERVICE (USE SHOW IDs) ─────────────────────────────
+async function fetchShowDetails(showIds) {
   const baseUrl = 'https://mxplayer-dun.vercel.app/api/service';
   const results = [];
+  const batchSize = 20;
 
-  // Batch in groups of 20
-  for (let i = 0; i < episodeIds.length; i += 20) {
-    const batch = episodeIds.slice(i, i + 20);
+  for (let i = 0; i < showIds.length; i += batchSize) {
+    const batch = showIds.slice(i, i + batchSize);
     const url = `${baseUrl}?id=${batch.join(',')}`;
-    console.log(`[EPISODES] fetching batch ${i / 20 + 1}: ${url}`);
+    console.log(`[EPISODES] fetching batch ${Math.floor(i / batchSize) + 1}: ${url}`);
 
     try {
       const response = await axios.get(url, { timeout: 20000 });
-      const showsData = response.data;
-      results.push(...showsData);
+      if (Array.isArray(response.data)) {
+        results.push(...response.data);
+      } else {
+        console.warn('[EPISODES] Unexpected response format:', response.data);
+      }
     } catch (err) {
-      console.error(`[EPISODES] batch ${i / 20 + 1} failed:`, err.message);
+      console.error('[EPISODES] batch failed:', err.message);
     }
 
-    // Delay between batches (1.2 seconds)
-    if (i + 20 < episodeIds.length) {
+    if (i + batchSize < showIds.length) {
       await new Promise(resolve => setTimeout(resolve, 1200));
     }
   }
-
   return results;
 }
 
-// ─── EXTRACT FIRST EPISODE INFO FROM SHOW DATA ─────────────────
-function extractFirstEpisode(showData) {
-  // Find first season (seasonNumber 1 or lowest), then first episode
-  if (!showData.seasons || showData.seasons.length === 0) return null;
-
-  // Sort seasons by seasonNumber ascending
-  const seasons = [...showData.seasons].sort((a, b) => a.seasonNumber - b.seasonNumber);
+// Extract first episode info from show detail
+function extractFirstEpisode(showDetail) {
+  if (!showDetail.seasons || showDetail.seasons.length === 0) return null;
+  const seasons = [...showDetail.seasons].sort((a, b) => a.seasonNumber - b.seasonNumber);
   const firstSeason = seasons[0];
   if (!firstSeason.episodes || firstSeason.episodes.length === 0) return null;
-
-  // Sort episodes by episodeNo ascending and take first
   const episodes = [...firstSeason.episodes].sort((a, b) => a.episodeNo - b.episodeNo);
+  const ep = episodes[0];
   return {
     seasonNumber: firstSeason.seasonNumber,
-    episodeNo: episodes[0].episodeNo,
-    title: episodes[0].title,
-    stream: episodes[0].stream,
-    imageInfo: episodes[0].imageInfo
+    episodeNo: ep.episodeNo,
+    title: ep.title,
+    stream: ep.stream,
+    imageInfo: ep.imageInfo
   };
 }
 
-// ─── BUILD SHOWS M3U PLAYLIST FOR ONE GENRE ────────────────────
-async function buildShowsM3UForGenre(genreName, genreFilterId) {
-  console.log(`\n[SHOWS] Processing genre: ${genreName} (${genreFilterId})`);
+// ─── BUILD MOVIES PLAYLIST ───────────────────────────────────────
+function buildMoviesM3U(movies) {
+  const lines = ['#EXTM3U'];
+  let validCount = 0;
+  for (const movie of movies) {
+    const streamUrl = buildStreamUrl(movie);
+    if (!streamUrl) continue;
+    const id = movie.id || '';
+    let logo = '';
+    const portraitLarge = movie.imageInfo?.find(img => img.type === 'portrait_large');
+    const anyImage = movie.imageInfo?.find(img => img.url);
+    const imageInfo = portraitLarge || anyImage;
+    if (imageInfo) logo = buildImageUrl(imageInfo.url);
+    lines.push(`#EXTINF:-1 tvg-id="${id}" tvg-logo="${logo}" group-title="Movies", ${movie.title}`);
+    lines.push(`${streamUrl}#.mp4`);
+    validCount++;
+  }
+  console.log(`[MOVIES] built ${validCount} entries`);
+  return { playlist: lines.join('\n'), validCount };
+}
 
-  // Fetch all shows of this genre
+// ─── BUILD SHOWS PLAYLIST FOR ONE GENRE ─────────────────────────
+async function buildShowsM3UForGenre(genreName, genreFilterId) {
+  console.log(`\n[SHOWS] Processing genre: ${genreName}`);
   const { items: shows, totalCount } = await fetchAllItems(2, genreFilterId);
   console.log(`[SHOWS] ${genreName}: total shows = ${totalCount}`);
 
-  // Collect episode IDs (firstVideo.id)
-  const episodeIdToShowMap = new Map(); // episodeId -> { showId, showTitle }
-  for (const show of shows) {
-    if (show.firstVideo && show.firstVideo.id) {
-      episodeIdToShowMap.set(show.firstVideo.id, {
-        showId: show.id,
-        showTitle: show.title
-      });
-    }
+  // Collect show IDs (show.id, not firstVideo.id)
+  const showIds = shows.map(show => show.id).filter(Boolean);
+  console.log(`[SHOWS] ${genreName}: collecting ${showIds.length} show IDs`);
+
+  if (showIds.length === 0) return { playlist: '', validCount: 0 };
+
+  const showDetailsArray = await fetchShowDetails(showIds);
+  console.log(`[SHOWS] ${genreName}: received details for ${showDetailsArray.length} shows`);
+
+  // Map by showId
+  const showDetailMap = {};
+  for (const detail of showDetailsArray) {
+    showDetailMap[detail.showId] = detail;
   }
-
-  const episodeIds = [...episodeIdToShowMap.keys()];
-  console.log(`[SHOWS] ${genreName}: collected ${episodeIds.length} episode IDs`);
-
-  if (episodeIds.length === 0) {
-    return { playlist: '', validCount: 0 };
-  }
-
-  // Fetch episode details in batches
-  const showsData = await fetchEpisodeDetails(episodeIds);
-  console.log(`[SHOWS] ${genreName}: received data for ${showsData.length} shows`);
 
   const lines = [];
   let validCount = 0;
 
-  for (const showData of showsData) {
-    const showInfo = episodeIdToShowMap.get(showData.showId);
-    if (!showInfo) continue;
+  for (const show of shows) {
+    const detail = showDetailMap[show.id];
+    if (!detail) continue;
 
-    const firstEpisode = extractFirstEpisode(showData);
-    if (!firstEpisode) {
-      console.warn(`[SHOWS] ${genreName}: no episode data for ${showInfo.showTitle}`);
-      continue;
-    }
+    const firstEpisode = extractFirstEpisode(detail);
+    if (!firstEpisode) continue;
 
     const streamUrl = buildStreamUrl(firstEpisode);
-    if (!streamUrl) {
-      console.warn(`[SHOWS] ${genreName}: no stream for ${showInfo.showTitle} S${firstEpisode.seasonNumber}E${firstEpisode.episodeNo}`);
-      continue;
-    }
+    if (!streamUrl) continue;
 
-    // Logo: landscape image from episode info
     let logo = '';
     const landscape = firstEpisode.imageInfo?.find(img => img.type === 'landscape');
     if (landscape && landscape.url) {
       logo = buildImageUrl(landscape.url);
     }
 
-    // Title format: ShowName - S0E0 - EpisodeTitle
-    const title = `${showInfo.showTitle} - S${firstEpisode.seasonNumber}E${firstEpisode.episodeNo} - ${firstEpisode.title}`;
-    lines.push(`#EXTINF:-1 tvg-id="${showInfo.showId}" tvg-logo="${logo}" group-title="${genreName}", ${title}`);
+    const title = `${show.title} - S${firstEpisode.seasonNumber}E${firstEpisode.episodeNo} - ${firstEpisode.title}`;
+    lines.push(`#EXTINF:-1 tvg-id="${show.id}" tvg-logo="${logo}" group-title="${genreName}", ${title}`);
     lines.push(`${streamUrl}#.mp4`);
     validCount++;
   }
 
-  console.log(`[SHOWS] ${genreName}: created ${validCount} valid entries`);
+  console.log(`[SHOWS] ${genreName}: built ${validCount} entries`);
   return { playlist: lines.join('\n'), validCount };
 }
 
-// ─── UPDATE MOVIES CACHE ───────────────────────────────────────
-async function updateMoviesIfNeeded(forceRebuild = false) {
-  if (isBuildingMovies) {
-    console.log('[MOVIES] already building, skipping');
-    return;
-  }
-  isBuildingMovies = true;
-  const start = Date.now();
-
+// ─── UPDATE FUNCTIONS ────────────────────────────────────────────
+async function updateMovies(force = false) {
+  if (isBuilding.movies) return;
+  isBuilding.movies = true;
   try {
-    const newTotalCount = await fetchTotalCount(1);
-    if (
-      forceRebuild ||
-      cachedMoviesPlaylist === null ||
-      cachedMoviesTotalCount === null ||
-      newTotalCount !== cachedMoviesTotalCount
-    ) {
-      console.log('[MOVIES] cache empty or count changed, rebuilding...');
-      const { items: movies, totalCount } = await fetchAllItems(1);
-      const { playlist, validCount } = buildMoviesM3U(movies);
-      cachedMoviesPlaylist = playlist;
-      cachedMoviesTotalCount = totalCount;
-      console.log(`[MOVIES] cache updated. total=${totalCount}, valid=${validCount}`);
-    } else {
-      console.log('[MOVIES] count unchanged, keeping old cache');
+    const total = await fetchTotalCount(1);
+    if (force || cache.movies.playlist === null || cache.movies.totalCount !== total) {
+      console.log('[MOVIES] rebuilding...');
+      const { items } = await fetchAllItems(1);
+      const { playlist, validCount } = buildMoviesM3U(items);
+      cache.movies = { playlist, totalCount: total };
     }
   } catch (err) {
     console.error('[MOVIES] update error:', err.message);
-    if (!cachedMoviesPlaylist) {
-      cachedMoviesPlaylist = '#EXTM3U\n';
-      cachedMoviesTotalCount = 0;
-    }
   } finally {
-    isBuildingMovies = false;
-    console.log(`[MOVIES] finished in ${((Date.now() - start) / 1000).toFixed(2)}s`);
+    isBuilding.movies = false;
   }
 }
 
-// ─── UPDATE SHOWS CACHE (all genres) ───────────────────────────
-async function updateShowsIfNeeded(forceRebuild = false) {
-  if (isBuildingShows) {
-    console.log('[SHOWS] already building, skipping');
-    return;
-  }
-  isBuildingShows = true;
-  const start = Date.now();
-
-  // Define genres with their API genreFilterIds
+async function updateShows(force = false) {
   const genres = [
     { name: 'Romance', filterId: '1dfb3454a9898389b8eae7ba7d664bc0' },
     { name: 'Drama', filterId: '48efa872f6f17facebf6149dfc536ee1' },
@@ -349,89 +267,107 @@ async function updateShowsIfNeeded(forceRebuild = false) {
     { name: 'K Drama', filterId: '0681d37530f4e2a8fc1f99bce0b707e4' }
   ];
 
-  try {
-    let combinedPlaylist = '#EXTM3U\n';
-    let totalValid = 0;
-
-    for (const genre of genres) {
+  for (const genre of genres) {
+    if (isBuilding.shows[genre.name]) continue;
+    isBuilding.shows[genre.name] = true;
+    try {
       const { playlist, validCount } = await buildShowsM3UForGenre(genre.name, genre.filterId);
-      if (validCount > 0) {
-        // Append genre playlist (skip the initial #EXTM3U line if present)
-        const lines = playlist.split('\n');
-        if (lines[0] === '#EXTM3U') lines.shift();
-        combinedPlaylist += lines.join('\n') + '\n';
-        totalValid += validCount;
+      cache.shows[genre.name] = { playlist, totalCount: validCount };
+    } catch (err) {
+      console.error(`[SHOWS:${genre.name}] update error:`, err.message);
+      if (!cache.shows[genre.name]) {
+        cache.shows[genre.name] = { playlist: '#EXTM3U\n', totalCount: 0 };
       }
+    } finally {
+      isBuilding.shows[genre.name] = false;
     }
-
-    cachedShowsPlaylist = combinedPlaylist;
-    // Store total count as number of valid episodes (or shows)
-    cachedShowsTotalCount = totalValid;
-    console.log(`[SHOWS] cache updated. total valid episodes = ${totalValid}`);
-  } catch (err) {
-    console.error('[SHOWS] update error:', err.message);
-    if (!cachedShowsPlaylist) {
-      cachedShowsPlaylist = '#EXTM3U\n';
-      cachedShowsTotalCount = 0;
-    }
-  } finally {
-    isBuildingShows = false;
-    console.log(`[SHOWS] finished in ${((Date.now() - start) / 1000).toFixed(2)}s`);
   }
 }
 
-// ─── SCHEDULE UPDATES ──────────────────────────────────────────
-// Movies update at 12:00 AM IST
+// ─── SCHEDULE ────────────────────────────────────────────────────
+// Movies: 12:00 AM IST
 cron.schedule('0 0 * * *', () => {
-  console.log('[CRON] Movies daily update triggered');
-  updateMoviesIfNeeded();
+  console.log('[CRON] Movies update');
+  updateMovies();
 }, { timezone: 'Asia/Kolkata' });
 
-// Shows update at 12:00 PM IST
+// Shows: 12:00 PM IST
 cron.schedule('0 12 * * *', () => {
-  console.log('[CRON] Shows daily update triggered');
-  updateShowsIfNeeded();
+  console.log('[CRON] Shows update');
+  updateShows();
 }, { timezone: 'Asia/Kolkata' });
 
-// ─── STARTUP INITIAL BUILD ─────────────────────────────────────
-updateMoviesIfNeeded().catch(err => console.error('[STARTUP] Movies build failed:', err));
-updateShowsIfNeeded().catch(err => console.error('[STARTUP] Shows build failed:', err));
+// Initial build on startup
+(async () => {
+  console.log('Starting initial cache build...');
+  await updateMovies(true);
+  await updateShows(true);
+  console.log('Initial cache build complete.');
+})().catch(err => console.error('Initial build error:', err));
 
 // ─── ROUTES ──────────────────────────────────────────────────────
+// /index.m3u -> movies + all shows
 app.get('/index.m3u', (req, res) => {
-  let combined = '#EXTM3U\n';
-
-  if (cachedMoviesPlaylist) {
-    combined += cachedMoviesPlaylist + '\n';
-  }
-  if (cachedShowsPlaylist) {
-    combined += cachedShowsPlaylist;
-  }
-
-  if (combined.trim() === '#EXTM3U') {
-    res.status(503).send('Playlist is being generated. Please try again shortly.');
-  } else {
-    res.setHeader('Content-Type', 'audio/x-mpegurl');
-    res.setHeader('Cache-Control', 'public, max-age=1800'); // 30 minutes
-    res.send(combined);
-  }
-});
-
-// Keep old endpoint for movies only (optional)
-app.get('/hindi.m3u', (req, res) => {
-  if (cachedMoviesPlaylist) {
+  if (cache.movies.playlist && Object.keys(cache.shows).length > 0) {
+    let combined = '#EXTM3U\n';
+    combined += cache.movies.playlist + '\n';
+    for (const genre of Object.keys(cache.shows)) {
+      const genrePlaylist = cache.shows[genre].playlist;
+      if (genrePlaylist && genrePlaylist.trim() !== '#EXTM3U') {
+        const lines = genrePlaylist.split('\n');
+        if (lines[0] === '#EXTM3U') lines.shift();
+        combined += lines.join('\n') + '\n';
+      }
+    }
     res.setHeader('Content-Type', 'audio/x-mpegurl');
     res.setHeader('Cache-Control', 'public, max-age=1800');
-    res.send(cachedMoviesPlaylist);
+    res.send(combined);
   } else {
     res.status(503).send('Playlist is being generated. Please try again shortly.');
   }
 });
 
+// /hindi.m3u -> movies only
+app.get('/hindi.m3u', (req, res) => {
+  if (cache.movies.playlist) {
+    res.setHeader('Content-Type', 'audio/x-mpegurl');
+    res.setHeader('Cache-Control', 'public, max-age=1800');
+    res.send(cache.movies.playlist);
+  } else {
+    res.status(503).send('Playlist is being generated. Please try again shortly.');
+  }
+});
+
+// Genre endpoints
+const genreEndpoints = [
+  { route: '/romance.m3u', key: 'Romance' },
+  { route: '/drama.m3u', key: 'Drama' },
+  { route: '/comedy.m3u', key: 'Comedy' },
+  { route: '/thriller.m3u', key: 'Thriller' },
+  { route: '/crime.m3u', key: 'Crime' },
+  { route: '/horror.m3u', key: 'Horror' },
+  { route: '/action.m3u', key: 'Action' },
+  { route: '/reality.m3u', key: 'Reality Show' },
+  { route: '/kdrama.m3u', key: 'K Drama' }
+];
+
+for (const ep of genreEndpoints) {
+  app.get(ep.route, (req, res) => {
+    const genreCache = cache.shows[ep.key];
+    if (genreCache && genreCache.playlist) {
+      res.setHeader('Content-Type', 'audio/x-mpegurl');
+      res.setHeader('Cache-Control', 'public, max-age=1800');
+      res.send(genreCache.playlist);
+    } else {
+      res.status(503).send('Playlist is being generated. Please try again shortly.');
+    }
+  });
+}
+
 app.get('/', (req, res) => {
-  res.send('MX Player Combined M3U service is running. Use /index.m3u for all content.');
+  res.send('MX Player M3U service. Endpoints: /index.m3u, /hindi.m3u, /drama.m3u, ...');
 });
 
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
