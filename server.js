@@ -41,26 +41,16 @@ let cachedTotalCount = null;
 let isBuilding = false;
 
 // ─── HELPERS ──────────────────────────────────────────────────────
-function buildImageUrl(imagePath, size = null) {
+// Image URL: exactly like getCastImageUrl (no dimension modification)
+function buildImageUrl(imagePath) {
   if (!imagePath) return '';
   if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
     return imagePath;
   }
-  let path = imagePath.startsWith('/') ? imagePath.slice(1) : imagePath;
-
-  if (size) {
-    const matches = [...path.matchAll(/\d+x\d+/g)];
-    if (matches.length > 0) {
-      const lastMatch = matches[matches.length - 1];
-      const { index, 0: match } = lastMatch;
-      path = path.slice(0, index) + size + path.slice(index + match.length);
-    }
-  }
-
-  return `https://qqcdnpictest.mxplay.com/${path}`;
+  return `https://qqcdnpictest.mxplay.com/${imagePath.startsWith('/') ? imagePath.slice(1) : imagePath}`;
 }
 
-// Updated stream URL builder: prioritizes DASH (.mpd)
+// Stream URL: DASH priority, HLS fallback, videoHash fallback
 function buildStreamUrl(item) {
   const stream = item.stream;
   if (!stream) return '';
@@ -151,12 +141,13 @@ function buildM3U(movies) {
     const id = movie.id || '';
     let logo = '';
 
+    // Use portrait_large image if available, else any image
     const portraitLarge = movie.imageInfo?.find(img => img.type === 'portrait_large');
     const anyImage = movie.imageInfo?.find(img => img.url);
     const imageInfo = portraitLarge || anyImage;
 
     if (imageInfo && imageInfo.url) {
-      logo = buildImageUrl(imageInfo.url, '320x480');
+      logo = buildImageUrl(imageInfo.url);   // No size modification
     }
 
     const title = movie.title || 'Unknown';
