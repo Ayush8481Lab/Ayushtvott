@@ -5,25 +5,38 @@ const cron = require('node-cron');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ─── API CONFIGURATION ───────────────────────────────────────────
-const API_BASE = 'https://tv.wapgotube.workers.dev/proxy/https://api.mxplayer.in/v1/web/detail/browseItem';
+// ─── PROXY CONFIGURATION ─────────────────────────────────────────
+const PROXY_BASE = 'https://ayushproxy-blue.vercel.app/api/proxy/';
 
-// Build query string in EXACT order as provided, with leading `&`
-function buildApiUrl(pageNum, pageSize) {
-  const params = new URLSearchParams();
-  params.set('pageNum', pageNum);
-  params.set('pageSize', pageSize);
-  params.set('isCustomized', 'true');
-  params.set('browseLangFilterIds', 'hi');
-  params.set('type', '1');
-  params.set('device-density', '1');
-  params.set('userid', '6d4a1a2c-5f2a-4f46-be26-901f8801dc88');
-  params.set('platform', 'com.mxplay.mobile');
-  params.set('content-languages', 'hi,en');
-  params.set('kids-mode-enabled', 'false');
-  // Note: URLSearchParams will produce "pageNum=...&pageSize=..." without leading "&".
-  // To match exactly "?&pageNum=...", we prepend an "&" manually.
-  return `${API_BASE}?&${params.toString()}`;
+// ─── API TARGET PARAMETERS (exact order) ─────────────────────────
+const API_TARGET_BASE = 'https://api.mxplayer.in/v1/web/detail/browseItem';
+const QUERY_PARAMS = [
+  ['pageNum', ''],           // placeholder, will be set per request
+  ['pageSize', ''],
+  ['isCustomized', 'true'],
+  ['browseLangFilterIds', 'hi'],
+  ['type', '1'],
+  ['device-density', '1'],
+  ['userid', '6d4a1a2c-5f2a-4f46-be26-901f8801dc88'],
+  ['platform', 'com.mxplay.mobile'],
+  ['content-languages', 'hi,en'],
+  ['kids-mode-enabled', 'false']
+];
+
+// Build the exact target URL (with query) and then wrap in proxy
+function buildProxyUrl(pageNum, pageSize) {
+  // Build target query string preserving order
+  const queryParts = QUERY_PARAMS.map(([key, val]) => {
+    if (key === 'pageNum') return `pageNum=${pageNum}`;
+    if (key === 'pageSize') return `pageSize=${pageSize}`;
+    return `${key}=${val}`;
+  });
+  const targetQuery = queryParts.join('&');
+  // Construct target full URL
+  const targetUrl = `${API_TARGET_BASE}?${targetQuery}`;
+  // Replace "https://" with "https:/" (one slash) for proxy path
+  const proxyPath = targetUrl.replace('https://', 'https:/');
+  return `${PROXY_BASE}${proxyPath}`;
 }
 
 // ─── IN-MEMORY CACHE ─────────────────────────────────────────────
@@ -52,7 +65,6 @@ function buildStreamUrl(item) {
              stream.hls?.main ||
              stream.mxplay?.hls?.high;
 
-  // Fallback using videoHash (if no explicit URL)
   if (!path && stream.videoHash) {
     path = `video/${stream.videoHash}/2/hls/h264_high.m3u8`;
   }
@@ -65,9 +77,9 @@ function buildStreamUrl(item) {
 
 // ─── FETCH TOTAL COUNT (lightweight) ─────────────────────────────
 async function fetchTotalCount() {
-  const url = buildApiUrl(0, 2); // pageNum=0, pageSize=2
+  const url = buildProxyUrl(0, 2); // pageSize=2 for fast count
   console.log(`[CHECK] ${url}`);
-  const response = await axios.get(url, { timeout: 10000 });
+  const response = await axios.get(url, { timeout: 12000 });
   const total = response.data.totalCount;
   console.log(`[CHECK] totalCount = ${total}`);
   return total;
@@ -81,7 +93,7 @@ async function fetchAllMovies() {
   let totalCount = null;
 
   while (true) {
-    const url = buildApiUrl(pageNum, pageSize);
+    const url = buildProxyUrl(pageNum, pageSize);
     console.log(`[FETCH] page ${pageNum}: ${url}`);
     const response = await axios.get(url, { timeout: 15000 });
     const data = response.data;
@@ -100,7 +112,6 @@ async function fetchAllMovies() {
     }
     pageNum++;
 
-    // Safety break to avoid infinite loops
     if (pageNum > 200) {
       console.error('[FETCH] too many pages, aborting');
       break;
@@ -164,7 +175,6 @@ async function updatePlaylistIfNeeded(forceRebuild = false) {
       const { movies, totalCount } = await fetchAllMovies();
       const { playlist, validCount } = buildM3U(movies);
 
-      // Always cache, even if empty, to stop endless 503
       cachedPlaylist = playlist;
       cachedTotalCount = totalCount;
       console.log(`[UPDATE] cache set. total=${totalCount}, valid=${validCount}`);
@@ -174,7 +184,6 @@ async function updatePlaylistIfNeeded(forceRebuild = false) {
   } catch (err) {
     console.error('[UPDATE] error:', err.message);
     if (!cachedPlaylist) {
-      // set empty fallback so we don't stay in 503 forever
       cachedPlaylist = '#EXTM3U\n';
       cachedTotalCount = 0;
       console.log('[UPDATE] set empty fallback cache');
@@ -200,10 +209,9 @@ updatePlaylistIfNeeded().catch(err => console.error('[STARTUP] build failed:', e
 app.get('/hindi.m3u', (req, res) => {
   if (cachedPlaylist) {
     res.setHeader('Content-Type', 'audio/x-mpegurl');
-    res.setHeader('Cache-Control', 'public, max-age=3600'); // 1 hour
+    res.setHeader('Cache-Control', 'public, max-age=3600');
     res.send(cachedPlaylist);
   } else {
-    // Should only happen on very first request while build is in progress
     res.status(503).send('Playlist is being generated. Please try again shortly.');
   }
 });
