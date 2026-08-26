@@ -44,8 +44,7 @@ const cache = {
   shows: {} // genre name -> { playlist, totalCount }
 };
 
-// Job status per genre
-const showJobs = {}; // genre -> { status: 'idle'|'processing'|'done'|'error', totalShows, completedShows, lastProcessed }
+const showJobs = {}; // genre -> { status, totalShows, completedShows, lastProcessed, playlist, error? }
 
 let isBuildingMovies = false;
 
@@ -92,7 +91,7 @@ function buildStreamUrl(item) {
   return `https://d3sgzbosmwirao.cloudfront.net/${path}`;
 }
 
-// Fetch total count
+// ─── FETCH FUNCTIONS ─────────────────────────────────────────────
 async function fetchTotalCount(type, genreFilterId = null) {
   const extra = { type: type };
   if (genreFilterId) extra.genreFilterIds = genreFilterId;
@@ -102,7 +101,6 @@ async function fetchTotalCount(type, genreFilterId = null) {
   return response.data.totalCount;
 }
 
-// Fetch all items (paginated)
 async function fetchAllItems(type, genreFilterId = null) {
   const allItems = [];
   let pageNum = 0;
@@ -138,6 +136,8 @@ async function fetchShowDetailsInBatches(showIds, onProgress) {
   const baseUrl = 'https://mxplayer-dun.vercel.app/api/service';
   const batchSize = 5;
   const results = [];
+  let successfulBatches = 0;
+  let failedBatches = 0;
 
   for (let i = 0; i < showIds.length; i += batchSize) {
     const batch = showIds.slice(i, i + batchSize);
@@ -148,38 +148,50 @@ async function fetchShowDetailsInBatches(showIds, onProgress) {
       const response = await axios.get(url, { timeout: 20000 });
       if (Array.isArray(response.data)) {
         results.push(...response.data);
+        successfulBatches++;
+      } else {
+        console.warn('[EPISODES] Unexpected response format:', response.data);
+        failedBatches++;
       }
     } catch (err) {
       console.error('[EPISODES] batch failed:', err.message);
+      failedBatches++;
     }
 
-    // Call progress callback
     if (onProgress) {
       onProgress(Math.min(i + batchSize, showIds.length));
     }
 
-    // Delay between batches (4 seconds)
     if (i + batchSize < showIds.length) {
       await new Promise(resolve => setTimeout(resolve, 4000));
     }
   }
+
+  console.log(`[EPISODES] fetched ${results.length} show details. Successful batches: ${successfulBatches}, failed: ${failedBatches}`);
   return results;
 }
 
-function extractFirstEpisode(showDetail) {
+// Find first episode with a valid stream
+function extractFirstEpisodeWithStream(showDetail) {
   if (!showDetail.seasons || showDetail.seasons.length === 0) return null;
+
   const seasons = [...showDetail.seasons].sort((a, b) => a.seasonNumber - b.seasonNumber);
-  const firstSeason = seasons[0];
-  if (!firstSeason.episodes || firstSeason.episodes.length === 0) return null;
-  const episodes = [...firstSeason.episodes].sort((a, b) => a.episodeNo - b.episodeNo);
-  const ep = episodes[0];
-  return {
-    seasonNumber: firstSeason.seasonNumber,
-    episodeNo: ep.episodeNo,
-    title: ep.title,
-    stream: ep.stream,
-    imageInfo: ep.imageInfo
-  };
+  for (const season of seasons) {
+    if (!season.episodes || season.episodes.length === 0) continue;
+    const episodes = [...season.episodes].sort((a, b) => a.episodeNo - b.episodeNo);
+    for (const ep of episodes) {
+      if (ep.stream) { // Ensure stream exists
+        return {
+          seasonNumber: season.seasonNumber,
+          episodeNo: ep.episodeNo,
+          title: ep.title,
+          stream: ep.stream,
+          imageInfo: ep.imageInfo
+        };
+      }
+    }
+  }
+  return null;
 }
 
 // ─── BUILD MOVIES PLAYLIST ───────────────────────────────────────
@@ -205,13 +217,13 @@ function buildMoviesM3U(movies) {
 
 // ─── PROCESS ONE GENRE ──────────────────────────────────────────
 async function processGenre(genre) {
-  // Set job status
   showJobs[genre.name] = {
     status: 'processing',
     totalShows: 0,
     completedShows: 0,
     lastProcessed: null,
-    playlist: null
+    playlist: null,
+    error: null
   };
 
   try {
@@ -233,6 +245,13 @@ async function processGenre(genre) {
       showJobs[genre.name].completedShows = completed;
     });
 
+    if (showDetailsArray.length === 0) {
+      showJobs[genre.name].status = 'error';
+      showJobs[genre.name].error = 'No show details fetched. Please check Vercel service.';
+      console.error(`[SHOWS:${genre.name}] no show details received.`);
+      return;
+    }
+
     // Build map by showId
     const showDetailMap = {};
     for (const detail of showDetailsArray) {
@@ -241,16 +260,27 @@ async function processGenre(genre) {
 
     const lines = ['#EXTM3U'];
     let validCount = 0;
+    let missingDetails = 0;
+    let missingStream = 0;
 
     for (const show of shows) {
       const detail = showDetailMap[show.id];
-      if (!detail) continue;
+      if (!detail) {
+        missingDetails++;
+        continue;
+      }
 
-      const firstEpisode = extractFirstEpisode(detail);
-      if (!firstEpisode) continue;
+      const firstEpisode = extractFirstEpisodeWithStream(detail);
+      if (!firstEpisode) {
+        missingStream++;
+        continue;
+      }
 
       const streamUrl = buildStreamUrl(firstEpisode);
-      if (!streamUrl) continue;
+      if (!streamUrl) {
+        missingStream++;
+        continue;
+      }
 
       let logo = '';
       const landscape = firstEpisode.imageInfo?.find(img => img.type === 'landscape');
@@ -264,17 +294,20 @@ async function processGenre(genre) {
       validCount++;
     }
 
+    console.log(`[SHOWS:${genre.name}] valid entries: ${validCount}, missing details: ${missingDetails}, missing stream/episode: ${missingStream}`);
+
     const playlist = lines.join('\n');
     cache.shows[genre.name] = { playlist, totalCount: validCount };
     showJobs[genre.name].status = 'done';
     showJobs[genre.name].completedShows = showIds.length;
     showJobs[genre.name].lastProcessed = new Date().toISOString();
     showJobs[genre.name].playlist = playlist;
-    console.log(`[SHOWS:${genre.name}] completed. Valid entries = ${validCount}`);
+    showJobs[genre.name].validCount = validCount;
   } catch (err) {
     console.error(`[SHOWS:${genre.name}] processing error:`, err.message);
     showJobs[genre.name].status = 'error';
     showJobs[genre.name].lastProcessed = new Date().toISOString();
+    showJobs[genre.name].error = err.message;
   }
 }
 
@@ -303,11 +336,10 @@ cron.schedule('0 0 * * *', () => {
   updateMovies();
 }, { timezone: 'Asia/Kolkata' });
 
-// Initial movies build on startup (non-blocking)
+// Initial movies build on startup
 updateMovies().catch(err => console.error('[STARTUP] Movies build failed:', err));
 
 // ─── ROUTES ──────────────────────────────────────────────────────
-// Trigger genre processing
 app.get('/trigger/:genre', (req, res) => {
   const genreName = req.params.genre;
   const genre = genres.find(g => g.name.toLowerCase() === genreName.toLowerCase());
@@ -329,7 +361,6 @@ app.get('/trigger/:genre', (req, res) => {
   // Start processing in background
   processGenre(genre).catch(err => console.error(`[TRIGGER] ${genre.name} failed:`, err));
 
-  // Return immediate accepted
   return res.json({
     status: 'started',
     genre: genre.name,
@@ -337,7 +368,6 @@ app.get('/trigger/:genre', (req, res) => {
   });
 });
 
-// Status endpoint (optional)
 app.get('/status/:genre', (req, res) => {
   const genreName = req.params.genre;
   const genre = genres.find(g => g.name.toLowerCase() === genreName.toLowerCase());
@@ -373,7 +403,7 @@ for (const genre of genres) {
   });
 }
 
-// Combined index (movies + any cached shows)
+// Combined index
 app.get('/index.m3u', (req, res) => {
   if (cache.movies.playlist) {
     let combined = '#EXTM3U\n';
