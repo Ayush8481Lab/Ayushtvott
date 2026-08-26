@@ -25,14 +25,12 @@ const QUERY_PARAMS = [
 
 // Build the exact target URL (with query) and then wrap in proxy
 function buildProxyUrl(pageNum, pageSize) {
-  // Build target query string preserving order
   const queryParts = QUERY_PARAMS.map(([key, val]) => {
     if (key === 'pageNum') return `pageNum=${pageNum}`;
     if (key === 'pageSize') return `pageSize=${pageSize}`;
     return `${key}=${val}`;
   });
   const targetQuery = queryParts.join('&');
-  // Construct target full URL
   const targetUrl = `${API_TARGET_BASE}?${targetQuery}`;
   // Replace "https://" with "https:/" (one slash) for proxy path
   const proxyPath = targetUrl.replace('https://', 'https:/');
@@ -44,17 +42,23 @@ let cachedPlaylist = null;
 let cachedTotalCount = null;
 let isBuilding = false;
 
-// ─── HELPERS ──────────────────────────────────────────────────────
+// ─── HELPERS (matching frontend logic) ──────────────────────────
+// Image URL: same as getCastImageUrl, but with optional size replacement
 function buildImageUrl(imagePath, size = null) {
   if (!imagePath) return '';
-  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) return imagePath;
+  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+    return imagePath;
+  }
   let path = imagePath.startsWith('/') ? imagePath.slice(1) : imagePath;
+
+  // If size provided and path contains a dimension like "160x240", replace it
   if (size && /\/\d+x\d+\//.test(path)) {
     path = path.replace(/\/\d+x\d+\//, `/${size}/`);
   }
   return `https://qqcdnpictest.mxplay.com/${path}`;
 }
 
+// Stream URL: exactly like getStreamUrl from React
 function buildStreamUrl(item) {
   const stream = item.stream;
   if (!stream) return '';
@@ -65,12 +69,10 @@ function buildStreamUrl(item) {
              stream.hls?.main ||
              stream.mxplay?.hls?.high;
 
-  if (!path && stream.videoHash) {
-    path = `video/${stream.videoHash}/2/hls/h264_high.m3u8`;
-  }
-
   if (!path) return '';
-  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    return path;
+  }
   path = path.startsWith('/') ? path.slice(1) : path;
   return `https://d3sgzbosmwirao.cloudfront.net/${path}`;
 }
@@ -136,10 +138,13 @@ function buildM3U(movies) {
     const id = movie.id || '';
     let logo = '';
 
+    // Use portrait_large image if available, else any image
     const portraitLarge = movie.imageInfo?.find(img => img.type === 'portrait_large');
     const anyImage = movie.imageInfo?.find(img => img.url);
     const imageInfo = portraitLarge || anyImage;
+
     if (imageInfo && imageInfo.url) {
+      // Get 320x480 version (if original is 160x240, it will be replaced)
       logo = buildImageUrl(imageInfo.url, '320x480');
     }
 
