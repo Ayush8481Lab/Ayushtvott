@@ -9,31 +9,14 @@ const PORT = process.env.PORT || 3000;
 const PROXY_BASE = 'https://ayushproxy-blue.vercel.app/api/proxy/';
 const API_TARGET_BASE = 'https://api.mxplayer.in/v1/web/detail/browseItem';
 
-function buildProxyUrl(pageNum, pageSize, extraParams = {}) {
-  const queryParts = [
-    ['pageNum', pageNum],
-    ['pageSize', pageSize],
-    ['isCustomized', 'true'],
-    ['browseLangFilterIds', 'hi'],
-    ['type', '1'],
-    ['device-density', '1'],
-    ['userid', '6d4a1a2c-5f2a-4f46-be26-901f8801dc88'],
-    ['platform', 'com.mxplay.mobile'],
-    ['content-languages', 'hi,en'],
-    ['kids-mode-enabled', 'false']
-  ];
-
-  for (const [key, value] of Object.entries(extraParams)) {
-    const existingIndex = queryParts.findIndex(([k]) => k === key);
-    if (existingIndex !== -1) {
-      queryParts[existingIndex][1] = value;
-    } else {
-      queryParts.splice(queryParts.length - 1, 0, [key, value]);
-    }
+// Build browse URL with exact parameter order
+function buildBrowseUrl(pageNum, pageSize, type, genreFilterId = null) {
+  let query = `pageNum=${pageNum}&pageSize=${pageSize}&isCustomized=true`;
+  if (genreFilterId) {
+    query += `&genreFilterIds=${genreFilterId}`;
   }
-
-  const targetQuery = queryParts.map(([key, value]) => `${key}=${value}`).join('&');
-  const targetUrl = `${API_TARGET_BASE}?${targetQuery}`;
+  query += `&type=${type}&device-density=1&userid=6d4a1a2c-5f2a-4f46-be26-901f8801dc88&platform=com.mxplay.mobile&content-languages=hi,en&kids-mode-enabled=false`;
+  const targetUrl = `${API_TARGET_BASE}?${query}`;
   const proxyPath = targetUrl.replace('https://', 'https:/');
   return `${PROXY_BASE}${proxyPath}`;
 }
@@ -93,9 +76,7 @@ function buildStreamUrl(item) {
 
 // ─── FETCH FUNCTIONS ─────────────────────────────────────────────
 async function fetchTotalCount(type, genreFilterId = null) {
-  const extra = { type: type };
-  if (genreFilterId) extra.genreFilterIds = genreFilterId;
-  const url = buildProxyUrl(0, 2, extra);
+  const url = buildBrowseUrl(0, 2, type, genreFilterId);
   console.log(`[CHECK] ${url}`);
   const response = await axios.get(url, { timeout: 12000 });
   return response.data.totalCount;
@@ -108,9 +89,7 @@ async function fetchAllItems(type, genreFilterId = null) {
   let totalCount = null;
 
   while (true) {
-    const extra = { type: type };
-    if (genreFilterId) extra.genreFilterIds = genreFilterId;
-    const url = buildProxyUrl(pageNum, pageSize, extra);
+    const url = buildBrowseUrl(pageNum, pageSize, type, genreFilterId);
     console.log(`[FETCH] page ${pageNum}: ${url}`);
     const response = await axios.get(url, { timeout: 15000 });
     const data = response.data;
@@ -131,56 +110,53 @@ async function fetchAllItems(type, genreFilterId = null) {
   return { items: allItems, totalCount };
 }
 
-// Fetch show details in small batches (5) with delay
-async function fetchShowDetailsInBatches(showIds, onProgress) {
+// Fetch episode details using firstVideo.id (episode id) in batches of 5 with delay
+async function fetchEpisodeDetailsInBatches(episodeIds, onProgress) {
   const baseUrl = 'https://mxplayer-dun.vercel.app/api/service';
   const batchSize = 5;
   const results = [];
   let successfulBatches = 0;
   let failedBatches = 0;
 
-  for (let i = 0; i < showIds.length; i += batchSize) {
-    const batch = showIds.slice(i, i + batchSize);
+  for (let i = 0; i < episodeIds.length; i += batchSize) {
+    const batch = episodeIds.slice(i, i + batchSize);
     const url = `${baseUrl}?id=${batch.join(',')}`;
     console.log(`[EPISODES] batch ${Math.floor(i / batchSize) + 1}: ${url}`);
 
     try {
       const response = await axios.get(url, { timeout: 20000 });
-      if (Array.isArray(response.data)) {
-        results.push(...response.data);
-        successfulBatches++;
-      } else {
-        console.warn('[EPISODES] Unexpected response format:', response.data);
-        failedBatches++;
+      let data = response.data;
+      if (!Array.isArray(data)) {
+        data = [data];
       }
+      results.push(...data);
+      successfulBatches++;
     } catch (err) {
       console.error('[EPISODES] batch failed:', err.message);
       failedBatches++;
     }
 
     if (onProgress) {
-      onProgress(Math.min(i + batchSize, showIds.length));
+      onProgress(Math.min(i + batchSize, episodeIds.length));
     }
 
-    if (i + batchSize < showIds.length) {
-      await new Promise(resolve => setTimeout(resolve, 4000));
+    if (i + batchSize < episodeIds.length) {
+      await new Promise(resolve => setTimeout(resolve, 3000));
     }
   }
 
-  console.log(`[EPISODES] fetched ${results.length} show details. Successful batches: ${successfulBatches}, failed: ${failedBatches}`);
+  console.log(`[EPISODES] fetched ${results.length} details. Successful batches: ${successfulBatches}, failed: ${failedBatches}`);
   return results;
 }
 
-// Find first episode with a valid stream
 function extractFirstEpisodeWithStream(showDetail) {
   if (!showDetail.seasons || showDetail.seasons.length === 0) return null;
-
   const seasons = [...showDetail.seasons].sort((a, b) => a.seasonNumber - b.seasonNumber);
   for (const season of seasons) {
     if (!season.episodes || season.episodes.length === 0) continue;
     const episodes = [...season.episodes].sort((a, b) => a.episodeNo - b.episodeNo);
     for (const ep of episodes) {
-      if (ep.stream) { // Ensure stream exists
+      if (ep.stream) {
         return {
           seasonNumber: season.seasonNumber,
           episodeNo: ep.episodeNo,
@@ -227,35 +203,39 @@ async function processGenre(genre) {
   };
 
   try {
-    // Fetch all shows of this genre
     const { items: shows, totalCount } = await fetchAllItems(2, genre.filterId);
-    const showIds = shows.map(show => show.id).filter(Boolean);
+    // Extract episode IDs from firstVideo.id (only those where type is 'episode')
+    const episodeIdToShowMap = new Map();
+    for (const show of shows) {
+      if (show.firstVideo && show.firstVideo.type === 'episode' && show.firstVideo.id) {
+        episodeIdToShowMap.set(show.firstVideo.id, show);
+      }
+    }
 
-    showJobs[genre.name].totalShows = showIds.length;
-    console.log(`[SHOWS:${genre.name}] total shows = ${showIds.length}`);
+    const episodeIds = [...episodeIdToShowMap.keys()];
+    showJobs[genre.name].totalShows = episodeIds.length;
+    console.log(`[SHOWS:${genre.name}] total shows with valid firstVideo = ${episodeIds.length}`);
 
-    if (showIds.length === 0) {
+    if (episodeIds.length === 0) {
       showJobs[genre.name].status = 'done';
       showJobs[genre.name].playlist = '#EXTM3U\n';
       return;
     }
 
-    // Fetch details in batches with progress update
-    const showDetailsArray = await fetchShowDetailsInBatches(showIds, (completed) => {
+    const episodeDetailsArray = await fetchEpisodeDetailsInBatches(episodeIds, (completed) => {
       showJobs[genre.name].completedShows = completed;
     });
 
-    if (showDetailsArray.length === 0) {
+    if (episodeDetailsArray.length === 0) {
       showJobs[genre.name].status = 'error';
-      showJobs[genre.name].error = 'No show details fetched. Please check Vercel service.';
-      console.error(`[SHOWS:${genre.name}] no show details received.`);
+      showJobs[genre.name].error = 'No episode details fetched.';
       return;
     }
 
-    // Build map by showId
-    const showDetailMap = {};
-    for (const detail of showDetailsArray) {
-      showDetailMap[detail.showId] = detail;
+    // Map by episode id (showId in response == the episode id we sent)
+    const episodeDetailMap = {};
+    for (const detail of episodeDetailsArray) {
+      episodeDetailMap[detail.showId] = detail;
     }
 
     const lines = ['#EXTM3U'];
@@ -263,8 +243,8 @@ async function processGenre(genre) {
     let missingDetails = 0;
     let missingStream = 0;
 
-    for (const show of shows) {
-      const detail = showDetailMap[show.id];
+    for (const [episodeId, show] of episodeIdToShowMap) {
+      const detail = episodeDetailMap[episodeId];
       if (!detail) {
         missingDetails++;
         continue;
@@ -299,7 +279,7 @@ async function processGenre(genre) {
     const playlist = lines.join('\n');
     cache.shows[genre.name] = { playlist, totalCount: validCount };
     showJobs[genre.name].status = 'done';
-    showJobs[genre.name].completedShows = showIds.length;
+    showJobs[genre.name].completedShows = episodeIds.length;
     showJobs[genre.name].lastProcessed = new Date().toISOString();
     showJobs[genre.name].playlist = playlist;
     showJobs[genre.name].validCount = validCount;
@@ -358,7 +338,6 @@ app.get('/trigger/:genre', (req, res) => {
     });
   }
 
-  // Start processing in background
   processGenre(genre).catch(err => console.error(`[TRIGGER] ${genre.name} failed:`, err));
 
   return res.json({
