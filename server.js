@@ -85,6 +85,12 @@ function buildStreamUrl(item) {
   return `https://d3sgzbosmwirao.cloudfront.net/${path}`;
 }
 
+// Sanitize title: remove newlines and collapse whitespace
+function sanitizeTitle(str) {
+  if (!str) return '';
+  return str.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 // ─── FETCH FUNCTIONS ─────────────────────────────────────────────
 async function fetchTotalCount(type, genreFilterId = null) {
   const url = buildBrowseUrl(0, 2, type, genreFilterId);
@@ -173,7 +179,8 @@ function buildMoviesM3U(movies, groupTitle) {
     const anyImage = movie.imageInfo?.find(img => img.url);
     const imageInfo = portraitLarge || anyImage;
     if (imageInfo) logo = buildImageUrl(imageInfo.url);
-    lines.push(`#EXTINF:-1 tvg-id="${id}" tvg-logo="${logo}" group-title="${groupTitle}", ${movie.title}`);
+    const safeTitle = sanitizeTitle(movie.title);
+    lines.push(`#EXTINF:-1 tvg-id="${id}" tvg-logo="${logo}" group-title="${groupTitle}", ${safeTitle}`);
     lines.push(`${streamUrl}#.mp4`);
     validCount++;
   }
@@ -247,7 +254,9 @@ async function processShowGenre(genre) {
             logo = buildImageUrl(landscape.url);
           }
 
-          const title = `${show.title} - S${season.seasonNumber}E${episode.episodeNo} - ${episode.title}`;
+          const safeShowTitle = sanitizeTitle(show.title);
+          const safeEpisodeTitle = sanitizeTitle(episode.title);
+          const title = `${safeShowTitle} - S${season.seasonNumber}E${episode.episodeNo} - ${safeEpisodeTitle}`;
           lines.push(`#EXTINF:-1 tvg-id="${show.id}" tvg-logo="${logo}" group-title="TV Show || ${genre.name}", ${title}`);
           lines.push(`${streamUrl}#.mp4`);
           validEpisodeCount++;
